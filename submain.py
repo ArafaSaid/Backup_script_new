@@ -16,8 +16,8 @@ def log(event_msg, event_cat):
     colorama.init()
     log_file = open('backutil_log.txt', 'a')
     current_time = time.localtime()
-    event_date = time.strftime('%Y-%m-%d', current_time)
-    event_time = time.strftime('%H:%M:%S', current_time)
+    event_date = time.strftime('%d-%m-%Y', current_time)
+    event_time = time.strftime('%I:%M:%S %p', current_time)
     event = event_date + " , " + event_time + " " + event_cat + " , " + event_msg + "\n"
     log_file.write(event)
     if event_cat == "Attempt":
@@ -68,7 +68,7 @@ def get_fixed_disk_with_most_free_space():
     partitions = [p for p in psutil.disk_partitions() if p.fstype != '']
     fixed_disks = [p for p in partitions if 'fixed' in p.opts]
     max_free_space_disk = max(fixed_disks, key=lambda x: psutil.disk_usage(x.mountpoint).free)
-    log("Get Most free space in volumes successfully.", "Success")
+    log(f"Selected disk for local backup: {max_free_space_disk.mountpoint}", "Success")
     return max_free_space_disk.mountpoint
 
 # Validate Backup Folder and create it if not exist
@@ -131,9 +131,10 @@ def split_and_generate_hashes(backup_files, config):
         for future in concurrent.futures.as_completed(hash_futures):
             file = hash_futures[future]
             try:
+                #check for Duplicate file 
                 file_hash = future.result()
                 if file_hash in combined_dict.values():
-                    # log(f"Duplicate file found: {file}", "Warning")
+                    #log(f"Duplicate file found: {file}", "Warning")
                     continue
                 else:
                     combined_dict[file] = file_hash

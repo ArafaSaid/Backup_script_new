@@ -18,9 +18,11 @@ from datetime import datetime
 import pyuac
 from submain import *
 from vss_snapshot import *
-from net_share import shared_folder_backup
+#from net_share import shared_folder_backup
+#from net_share2 import shared_folder_backup,file_filter,is_server_online
+from net_share3 import shared_folder_backup,file_filter,is_server_online
 import traceback
-
+import errno
 
 class Config:
     def __init__(self, computer_name, user_name, source_directory, directory_to_backup, retention_policy, max_threads,
@@ -54,6 +56,7 @@ class Config:
         self.files_to_back_up = []
         self.snapshot_ids = {}
         self.key = b'IBcc4gScWlZZLj-NRrzWz_bbzHDq_ZcI-VO4DHdBdxk='
+        self.force_full_backup = False
 
 # check the last date of backup
 def get_last_backup_date(backup_dir):
@@ -121,17 +124,24 @@ def get_changed_files_since_last_backup(config):
     log("Getting changed files since last backup...", "Attempt")
     snapshot_ids = Full_backup(config)
     # JOINs previous hashes DB and tracker DB to find files to back up
-    query_data = (config.previous_db_name,)
-    config.tracker_db_cursor.execute("ATTACH ? as backutil_previous", query_data)
-    results = config.tracker_db_cursor.execute(
-        "SELECT backutil_tracker.drive, backutil_tracker.file, backutil_tracker.hash, backutil_tracker.mtime,backutil_tracker.size, backutil_previous.date FROM backutil_tracker LEFT JOIN backutil_previous ON backutil_tracker.hash=backutil_previous.hash AND backutil_tracker.mtime = backutil_previous.mtime AND backutil_tracker.size = backutil_previous.size;")
+    try:
+        query_data = (config.previous_db_name,)
+        config.tracker_db_cursor.execute("ATTACH ? as backutil_previous", query_data)
+        results = config.tracker_db_cursor.execute(
+            "SELECT backutil_tracker.drive, backutil_tracker.file, backutil_tracker.hash, backutil_tracker.mtime,backutil_tracker.size, backutil_previous.date FROM backutil_tracker LEFT JOIN backutil_previous ON backutil_tracker.hash=backutil_previous.hash AND backutil_tracker.mtime = backutil_previous.mtime AND backutil_tracker.size = backutil_previous.size;")
+    except sqlite3.OperationalError as err:
+                if "no such table" in str(err) or "no such file or directory" in str(err):
+                    log("Database error: Database file missing or corrupt. Initiating full backup.", "Warning")
+                    config.force_full_backup = True  # Flag to trigger full backup
+                    return config.files_to_back_up , snapshot_ids, config.force_full_backup
     if results:
         for line in results:
+            # deepcode ignore change_to_is: <please specify a reason of ignoring this>
             if line[5] == None:
                 config.files_to_back_up.append(line)
     else:
         log("there is no files to backup.", "Success")
-    return config.files_to_back_up , snapshot_ids
+    return config.files_to_back_up , snapshot_ids ,config.force_full_backup
 
 def Full_backup(config):
     backup_list = read_objects_to_backup_from_file(config)
@@ -178,8 +188,15 @@ def main_backup(config):
     elif backup_type == "incremental":
         # perform incremental backup
         backup_filename = "Incremental-" + today.strftime("%Y%m%d") + ".zip"
-        changed_files , snapshot_ids = get_changed_files_since_last_backup(config)
-        if changed_files is None or len(changed_files) == 0:
+        changed_files , snapshot_ids, config.force_full_backup = get_changed_files_since_last_backup(config)
+        if config.force_full_backup:
+            # perform full backup
+            backup_filename = "Full-" + today.strftime("%Y%m%d") + ".zip"
+            results = config.tracker_db_cursor.execute("SELECT drive,file,hash,mtime,size,'None' AS date FROM backutil_tracker;")
+            for line in results:
+                config.files_to_back_up.append(line)
+                
+        elif changed_files is None or len(changed_files) == 0:
             log("No backup needed.", "INFORMA")
             # Delete VSS snapshots
             for snapshot_id in snapshot_ids.values():
@@ -201,6 +218,7 @@ def main_backup(config):
         if config.shared_folder == "True":
                 try:
                     shared_folder_backup(config)
+                    free_up_space(config)
                 except Exception as err:
                     log(f"Error checking shared server{err}.", "Failure")
         try:
@@ -214,7 +232,7 @@ def main_backup(config):
     temp_folder_path = os.path.join(backup_dir, backup_folder)
     config.temp_folder_path = temp_folder_path
     try:
-        os.mkdir(temp_folder_path)
+        os.makedirs(temp_folder_path)
     except:
         log("Error creating session folder (or already exists).", "Warning")
     log("Backup and session folders created successfully.", "Success")
@@ -246,26 +264,27 @@ def main_backup(config):
         archive_path += '.zip'
     elif archive_format == '.tar.lz4':
         archive_path += '.tar.lz4'
-    create_archive_from_folder(temp_folder_path, archive_path, archive_format,config)
+    create_status = create_archive_from_folder(temp_folder_path, archive_path, archive_format,config)
     
     # Delete VSS snapshots
     for volume, snapshot_id in snapshot_ids.items():
         delete_vss_snapshot(snapshot_id)
+    if create_status:
     # Write backed up hashes to DB
-    log("Writing hashes to DB...", "Attempt")
-    try:
-        manage_previous_db(config, "open")
-        for key, value in combined_dict.items():
-            #drive = config.backup_files[key]['drive']
-            mtime = value['mtime']
-            size = value['size']
-            query_data = (config.backup_time, key,mtime,size)
-            config.previous_db_cursor.execute("INSERT INTO backutil_previous (date, hash, mtime, size) VALUES (?, ?, ?, ?);", query_data)
-        config.previous_db_conn.commit()
-        manage_previous_db(config, "close")
-        log("Hashes written to DB successfully.", "Success")
-    except:
-        log("Error writing hashes to DB.", "Warning")
+        log("Writing hashes to DB...", "Attempt")
+        try:
+            manage_previous_db(config, "open")
+            for key, value in combined_dict.items():
+                #drive = config.backup_files[key]['drive']
+                mtime = value['mtime']
+                size = value['size']
+                query_data = (config.backup_time, key,mtime,size)
+                config.previous_db_cursor.execute("INSERT INTO backutil_previous (date, hash, mtime, size) VALUES (?, ?, ?, ?);", query_data)
+            config.previous_db_conn.commit()
+            manage_previous_db(config, "close")
+            log("Hashes written to DB successfully.", "Success")
+        except:
+            log("Error writing hashes to DB.", "Warning")
 
 # create zip from temp folder
 def create_zip_file_from_folder(src_dir, archive_path,retries=3, retry_delay=10):
@@ -321,7 +340,7 @@ def is_zip_valid(filepath):
     except Exception:
         return False
 
-def create_lz4_file_from_folder(src_dir, archive_path, retries=3, retry_delay=10):
+def create_lz4_file_from_folder(src_dir, archive_path,config ,retries=3, retry_delay=10):
     start_time_zip = datetime.now()
     log("Creating lz4 file from folder: " + src_dir, "Attempt")
     object_to_backup_path = Path(src_dir)
@@ -337,10 +356,16 @@ def create_lz4_file_from_folder(src_dir, archive_path, retries=3, retry_delay=10
             duration_str = str(duration_zip).split('.')[0]  # Remove the fractional seconds
             log('lz4 archive Duration: ' + duration_str, "Success")
             return True
-        except Exception as e:
-            log("Process terminate : {}".format(e), "Failure")
-            log(f"Error encountered during lz4 file creation: {str(e)}", "Error")
-            log(f"Traceback: {traceback.format_exc()}", "Error")
+        except OSError as e:
+            if e.errno == errno.ENOSPC:  # No space left
+                log(f"Error creating LZ4 file: {e}!", "Failure")
+                # Potential actions:
+                if os.path.exists(archive_path):  # Check if the file was partially created
+                    os.remove(archive_path)  # Remove the partial file
+                free_up_space(config)
+            else:
+                log(f"Unexpected error encountered during lz4 file creation: {str(e)}", "Error")
+                log(f"Traceback: {traceback.format_exc()}", "Error")
             if i < retries-1:
                 log(f"LZ4 file creation failed ({e}). Retrying in {retry_delay} seconds...", "Warning")
                 time.sleep(retry_delay)
@@ -351,9 +376,11 @@ def create_lz4_file_from_folder(src_dir, archive_path, retries=3, retry_delay=10
         
 def create_archive_from_folder(src_dir, archive_path, archive_format,config):
     if archive_format == 'zip':
-        create_zip_file_from_folder(src_dir, archive_path)
+        status = create_zip_file_from_folder(src_dir, archive_path)
+        return status
     elif archive_format == '.tar.lz4':
-        create_lz4_file_from_folder(src_dir, archive_path)
+        status = create_lz4_file_from_folder(src_dir, archive_path,config)
+        return status
     else:
         raise ValueError(f"Unsupported archive format: {archive_format}")
 
@@ -363,9 +390,46 @@ def get_folder_size(folder_path):
     for dirpath, dirnames, filenames in os.walk(folder_path):
         for file in filenames:
             file_path = os.path.join(dirpath, file)
-            total_size += os.path.getsize(file_path)
-    
+            total_size += os.path.getsize(file_path) 
     return total_size
+
+def free_up_space(config):
+    try:
+        is_online = is_server_online(config.server_ip)
+        source_files = file_filter(config.directory_to_backup)
+
+        if is_online:
+            dest_folder = os.path.join(config.server_directory, config.user_name)
+            sync_files_with_server(dest_folder, source_files, config)
+        else:
+            handle_offline_backup(source_files, config)
+    except OSError as e:
+        log(f"Error managing files: {e}!", "Failure")
+
+def sync_files_with_server(dest_folder, source_files, config):
+    for file in source_files:
+        source_path = os.path.join(config.directory_to_backup, file)
+        destination_path = os.path.join(dest_folder, file)
+        if os.path.exists(destination_path) and os.path.getsize(destination_path) == os.path.getsize(source_path):
+            os.remove(source_path)
+            log(f'Deleted local backup file: {file}', "Success")
+        else:
+            shared_folder_backup(config)
+            if os.path.exists(source_path):
+                os.remove(source_path)
+
+def handle_offline_backup(source_files, config):
+    most_free_space_drive = get_fixed_disk_with_most_free_space()
+    folder_path = os.path.join(most_free_space_drive, "system_backup")
+    create_hidden_folder(folder_path)
+    for file in source_files:
+        move_backup_file(file, config.directory_to_backup, folder_path)
+
+def move_backup_file(file, source_dir, destination_dir):
+    source_path = os.path.join(source_dir, file)
+    destination_path = os.path.join(destination_dir, file)
+    shutil.move(source_path, destination_path)
+    log(f'Moved backup file {file} to: {destination_dir}', "Success")
 
 def choose_archive_format_based_on_cpu_cores_and_size(folder_path):
     cpu_cores = os.cpu_count()
@@ -406,8 +470,8 @@ def delete_old_backups(backup_directory, delete_retention_policy,config):
         elif backup_file.startswith('Incremental-'):
             incremental_backups.append(backup_file)
     # Sort the backup files by date
-    full_backups.sort(key=lambda x: datetime.strptime(re.search('\d{8}', x).group(), '%Y%m%d'), reverse=True)
-    incremental_backups.sort(key=lambda x: datetime.strptime(re.search('\d{8}', x).group(), '%Y%m%d'),
+    full_backups.sort(key=lambda x: datetime.strptime(re.search(r'\d{8}', x).group(), '%Y%m%d'), reverse=True)
+    incremental_backups.sort(key=lambda x: datetime.strptime(re.search(r'\d{8}', x).group(), '%Y%m%d'),
                              reverse=True)
     # Delete old full backups
     for i in range(full_backups_to_keep, len(full_backups)):
@@ -530,7 +594,7 @@ def main():
 
 if __name__ == "__main__":
     if not pyuac.isUserAdmin():
-        clear_log()
+        #clear_log()
         log("Re-launching as admin!" , "Attempt")
         try:
             pyuac.runAsAdmin()
@@ -540,5 +604,5 @@ if __name__ == "__main__":
     else:
         multiprocessing.freeze_support()
         start_time = datetime.now()
-        clear_log()
+        #clear_log()
         main()

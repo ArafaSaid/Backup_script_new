@@ -63,6 +63,7 @@ def create_symbolic_links(shadow_ids, link_directory):
     for volume, shadow_id in shadow_ids.items():
         # Get the snapshot device object for the Shadow ID
         command = f'vssadmin list shadows /Shadow={shadow_id}'
+        # deepcode ignore HandleUnicode: <please specify a reason of ignoring this>
         output = subprocess.check_output(command, shell=True, text=True)
         device_object = None
         for line in output.split('\n'):
@@ -148,6 +149,9 @@ def get_all_files_to_backup(volumes, snapshot_ids, config):
     duration_str = str(duration).split('.')[0]  # Remove the fractional seconds
     log('Generating list of files in backup directories Duration: ' + duration_str , "Success")
     return config.backup_files
+
+
+
 
 def format_folder_size(total_size_bytes):
     bytes_in_gb = 1024 * 1024 * 1024
