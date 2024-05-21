@@ -20,7 +20,8 @@ from submain import *
 from vss_snapshot import *
 #from net_share import shared_folder_backup
 #from net_share2 import shared_folder_backup,file_filter,is_server_online
-from net_share3 import shared_folder_backup,file_filter,is_server_online
+#from net_share3 import shared_folder_backup,file_filter,is_server_online
+from net_share4 import shared_folder_backup,file_filter,is_server_online
 import traceback
 import errno
 
@@ -148,6 +149,7 @@ def Full_backup(config):
     # Group the backup paths by volume
     if len(backup_list)==0:
         log("No Data to backup needed.", "INFORMA")
+        log("Finished.", "Success")
         sys.exit()
     volumes = {}
     for path in backup_list:
@@ -173,9 +175,15 @@ def main_backup(config):
         log("No backup needed.", "INFORMA")
         if config.shared_folder == "True":
             try:
-                shared_folder_backup(config)
+                success = shared_folder_backup(config)
+                if success:
+                        try:
+                            delete_old_backups(config.directory_to_backup,config.delete_retention_policy,config)
+                        except:
+                            log("Error deleting previous backups.", "Failure")
             except Exception as err:
                 log(f"Error checking shared server{err}.", "Failure")
+        log("Finished.", "Success")
         sys.exit()
     elif backup_type == "full":
         # perform full backup
@@ -203,9 +211,15 @@ def main_backup(config):
                 delete_vss_snapshot(snapshot_id)
             if config.shared_folder == "True":
                 try:
-                    shared_folder_backup(config)
+                    success = shared_folder_backup(config)
+                    if success:
+                        try:
+                            delete_old_backups(config.directory_to_backup,config.delete_retention_policy,config)
+                        except:
+                            log("Error deleting previous backups.", "Failure")
                 except Exception as err:
                     log(f"Error checking shared server{err}.", "Failure")
+            log("Finished.", "Success")
             sys.exit()
         get_total(config)
      # Create staging folder and copy files, make list
@@ -217,14 +231,16 @@ def main_backup(config):
                 delete_vss_snapshot(snapshotid)
         if config.shared_folder == "True":
                 try:
-                    shared_folder_backup(config)
-                    free_up_space(config)
+                    success = shared_folder_backup(config)
+                    if success:
+                        free_up_space(config)
                 except Exception as err:
                     log(f"Error checking shared server{err}.", "Failure")
         try:
             delete_old_backups(config.directory_to_backup,config.delete_retention_policy,config)
         except:
             log("Error deleting previous backups.", "Failure")
+        log("Finished.", "Success")
         sys.exit()
     config.backup_time = today.strftime("%Y%m%d")
     backup_dir = config.directory_to_backup
@@ -410,13 +426,41 @@ def sync_files_with_server(dest_folder, source_files, config):
     for file in source_files:
         source_path = os.path.join(config.directory_to_backup, file)
         destination_path = os.path.join(dest_folder, file)
+        
+        #scan local backup folder for folder not deleted
+        subfolders= [f.path for f in os.scandir(config.directory_to_backup) if f.is_dir()]
+        subfolders.sort(key=lambda x: datetime.strptime(re.search(r'\d{8}', x).group(), '%Y%m%d'), reverse=True)
+        today = datetime.now()
+        today = today.strftime('%Y%m%d')
+        for folder in subfolders:
+            path, name= os.path.split(folder)
+            if name.startswith('Full-'):
+                date_str = name[5:]  # extract date part from filename
+                try:
+                    date_folder = datetime.strptime(date_str, '%Y%m%d')
+                    date_del = datetime.strptime(today, '%Y%m%d')
+                    if date_del != date_folder:
+                        shutil.rmtree(folder)
+                except ValueError:
+                    pass  # ignore files with invalid date format
+            elif name.startswith('Incremental-'):
+                date_str = name[12:]  # extract date part from filename
+                try:
+                    date_folder = datetime.strptime(date_str, '%Y%m%d')
+                    date_del = datetime.strptime(today, '%Y%m%d')
+                    if date_del != date_folder:
+                        shutil.rmtree(folder)
+                except ValueError:
+                    pass  # ignore files with invalid date format
+
         if os.path.exists(destination_path) and os.path.getsize(destination_path) == os.path.getsize(source_path):
             os.remove(source_path)
             log(f'Deleted local backup file: {file}', "Success")
         else:
-            shared_folder_backup(config)
-            if os.path.exists(source_path):
-                os.remove(source_path)
+            success = shared_folder_backup(config)
+            if success:
+                if os.path.exists(source_path):
+                    os.remove(source_path)
 
 def handle_offline_backup(source_files, config):
     most_free_space_drive = get_fixed_disk_with_most_free_space()
